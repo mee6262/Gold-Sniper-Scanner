@@ -1,0 +1,5 @@
+git+https://github.com/BEPb/tvdatafeed.git
+pandas
+numpy
+requests
+pytz
