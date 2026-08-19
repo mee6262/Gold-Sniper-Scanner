@@ -1,4 +1,4 @@
-https://github.com/BEPb/tvdatafeed/archive/refs/heads/main.zip
+https://github.com/rongardF/tvdatafeed/archive/refs/heads/main.zip
 pandas
 numpy
 requests
