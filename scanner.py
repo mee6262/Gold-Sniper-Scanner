@@ -153,7 +153,22 @@ def run_scanner():
     p_highs, p_lows = find_pivots(df)
     swept_info = check_swept_liquidity(df, p_highs, p_lows)
     ob_info = calculate_ob_poc(df)
-    
+
+    # --- DEBUG: ดูว่าใกล้เกณฑ์แค่ไหน ---
+    print(f"🔍 Debug | Pivot Highs: {len(p_highs)} | Pivot Lows: {len(p_lows)}")
+    if len(p_highs) >= 2:
+        _, ph2, _ = p_highs[-1]; _, ph1, _ = p_highs[-2]
+        diff_h = abs(ph2 - ph1) / ph1 * 100
+        print(f"   ล่าสุด Pivot High คู่ท้าย: {ph1:.2f} vs {ph2:.2f} (ห่างกัน {diff_h:.4f}% | เกณฑ์ {THRESHOLD_PCT}%)")
+    if len(p_lows) >= 2:
+        _, pl2, _ = p_lows[-1]; _, pl1, _ = p_lows[-2]
+        diff_l = abs(pl2 - pl1) / pl1 * 100
+        print(f"   ล่าสุด Pivot Low คู่ท้าย: {pl1:.2f} vs {pl2:.2f} (ห่างกัน {diff_l:.4f}% | เกณฑ์ {THRESHOLD_PCT}%)")
+    last5 = df.iloc[-TUNING:][['Open', 'Close']]
+    colors = ['เขียว' if r.Close > r.Open else 'แดง' for r in last5.itertuples()]
+    print(f"   5 แท่งล่าสุด (สำหรับ OB check): {colors}")
+    # --- END DEBUG ---
+
     # Resolve direction & filter out conflicting swept_info
     setup_direction = None
     if swept_info and ob_info:
