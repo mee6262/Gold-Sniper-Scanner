@@ -1,4 +1,4 @@
-https://github.com/rongardF/tvdatafeed/archive/f18e9508d4b31175bd3fb4f4c8e762c2f826353d.zip
+https://github.com/rongardF/tvdatafeed.git@f18e9508d4b31175bd3fb4f4c8e762c2f826353d
 pandas
 numpy
 requests
