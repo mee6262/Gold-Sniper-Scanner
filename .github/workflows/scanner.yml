@@ -2,20 +2,22 @@ name: XAUUSD SMC Scanner
 
 on:
   schedule:
-    # รันทุกๆ นาทีที่ 00 และ 30 (ทุก 30 นาที ตรงเวลาปิดแท่ง)
-    - cron: '0,30 * * * *'
-  workflow_dispatch: # ปุ่มกดรันเองมือหมุนบน GitHub
+    # รันเฉพาะช่วงเวลาตลาดเปิด (จันทร์-ศุกร์ 01:00 - 19:00 UTC)
+    - cron: '0,30 1-19 * * 1-5'
+  workflow_dispatch:
 
 jobs:
-  run-scanner:
+  scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -35,5 +37,6 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .last_alert_time || true
+          git pull --rebase origin main || true
           git commit -m "update last alert state [skip ci]" || true
           git push || true
