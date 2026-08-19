@@ -7,14 +7,15 @@ import pytz
 from tvDatafeed import TvDatafeed, Interval
 
 # ==========================================
-# 1. PARAMETERS CONFIGURATION (ตั้งค่าตามจริงของมี่)
+# 1. PARAMETERS CONFIGURATION
 # ==========================================
 TUNING = 5                # Order Block Candle Count
 AMOUNT_OF_BOXES = 10      # ซอย OB เป็น 10 ช่องย่อยเพื่อหา POC
 PIVOT_LEFT = 8            # Liquidity Pivot Left
 PIVOT_RIGHT = 3           # Liquidity Pivot Right
 THRESHOLD_PCT = 0.03      # Equality Threshold (%)
-MAX_ENTRY_DISTANCE = 2.0  # ถ้าราคาปัจจุบันห่างจาก POC เกิน $2.0 (200 จุด) ไม่ส่ง Alert
+MAX_ENTRY_DISTANCE = 2.0  # ถ้าราคาห่างจาก Entry เกิน $2.0 (200 จุด) ไม่ส่ง Alert
+LAST_ALERT_FILE = ".last_alert_time"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -23,29 +24,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # ==========================================
 # 2. DATA FETCHING & TELEGRAM HELPER
 # ==========================================
-def fetch_gold_data_tv():
-    """ดึงข้อมูลราคาและ Volume ตรงจาก TradingView (OANDA:XAUUSD)"""
-    try:
-        tv = TvDatafeed()
-        df = tv.get_hist(symbol='XAUUSD', exchange='OANDA', interval=Interval.in_30_minute, n_bars=100)
-        if df is None or df.empty:
-            print("⚠️ ไม่สามารถดึงข้อมูลจาก TradingView ได้")
-            return None
-            
-        df.index = pd.to_datetime(df.index)
-        tz_th = pytz.timezone('Asia/Bangkok')
-        df.index = df.index.tz_localize('UTC').tz_convert(tz_th)
-        
-        df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
-        return df[['Open', 'High', 'Low', 'Close', 'Volume']]
-    except Exception as e:
-        print(f"❌ Error fetching TradingView data: {e}")
-        return None
-
 def send_telegram_alert(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ ไม่พบ Token/ChatID - แสดงผลบน Console:")
-        print(message)
+        print("⚠️ ไม่พบ Token/ChatID - แสดงผลบน Console:\n", message)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
@@ -54,9 +35,26 @@ def send_telegram_alert(message):
     except Exception as e:
         print(f"❌ Error sending Telegram alert: {e}")
 
+def fetch_gold_data_tv():
+    try:
+        tv = TvDatafeed()
+        df = tv.get_hist(symbol='XAUUSD', exchange='OANDA', interval=Interval.in_30_minute, n_bars=100)
+        if df is None or df.empty:
+            send_telegram_alert("⚠️ *Scanner System Alert:* ไม่สามารถดึงข้อมูลจาก TradingView ได้ (Rate Limit/IP Block)")
+            return None
+            
+        df.index = pd.to_datetime(df.index)
+        tz_th = pytz.timezone('Asia/Bangkok')
+        df.index = df.index.tz_localize('UTC').tz_convert(tz_th)
+        df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
+        return df[['Open', 'High', 'Low', 'Close', 'Volume']]
+    except Exception as e:
+        send_telegram_alert(f"❌ *Scanner System Error:* {e}")
+        return None
+
 
 # ==========================================
-# 3. CORE ANALYTICS ENGINE
+# 3. CORE ANALYTICS ENGINE (DYNAMIC)
 # ==========================================
 def find_pivots(df):
     highs, lows, volumes = df['High'].values, df['Low'].values, df['Volume'].values
@@ -69,89 +67,142 @@ def find_pivots(df):
             p_lows.append((i, lows[i], volumes[i]))
     return p_highs, p_lows
 
-def check_recent_swept_eqh(df, p_highs):
-    if len(p_highs) < 2: return None
-    for i in range(len(p_highs) - 1, 0, -1):
-        idx2, price2, vol2 = p_highs[i]
-        idx1, price1, vol1 = p_highs[i - 1]
-        diff = abs(price2 - price1) / price1 * 100
-        if diff <= THRESHOLD_PCT:
-            eqh_top = max(price1, price2)
-            latest_high = df['High'].iloc[-1]
-            latest_close = df['Close'].iloc[-1]
-            if latest_high > eqh_top and latest_close < eqh_top:
-                return {'swept_level': eqh_top, 'total_vol': vol1 + vol2}
+def check_swept_liquidity(df, p_highs, p_lows):
+    """เช็คทั้ง Swept EQH (Bearish) และ Swept EQL (Bullish)"""
+    latest_high = df['High'].iloc[-1]
+    latest_low = df['Low'].iloc[-1]
+    latest_close = df['Close'].iloc[-1]
+    
+    # Check Bearish Swept EQH
+    if len(p_highs) >= 2:
+        for i in range(len(p_highs) - 1, 0, -1):
+            _, price2, _ = p_highs[i]
+            _, price1, _ = p_highs[i - 1]
+            if abs(price2 - price1) / price1 * 100 <= THRESHOLD_PCT:
+                eqh_top = max(price1, price2)
+                if latest_high > eqh_top and latest_close < eqh_top:
+                    return {'direction': 'SHORT', 'level': eqh_top}
+                    
+    # Check Bullish Swept EQL
+    if len(p_lows) >= 2:
+        for i in range(len(p_lows) - 1, 0, -1):
+            _, price2, _ = p_lows[i]
+            _, price1, _ = p_lows[i - 1]
+            if abs(price2 - price1) / price1 * 100 <= THRESHOLD_PCT:
+                eql_bot = min(price1, price2)
+                if latest_low < eql_bot and latest_close > eql_bot:
+                    return {'direction': 'LONG', 'level': eql_bot}
+                    
     return None
 
 def calculate_ob_poc(df):
+    """ตรวจหา Order Block + POC ทั้ง Bullish และ Bearish"""
     if len(df) < TUNING: return None
     sub_df = df.iloc[-TUNING:]
     first_bar = sub_df.iloc[0]
     
-    # เงื่อนไข Bearish OB: แท่งแรกเขียว + อีก 4 แท่งปิดแดง
-    if first_bar['Close'] > first_bar['Open'] and all(sub_df.iloc[1:]['Close'] <= sub_df.iloc[1:]['Open']):
-        ob_top, ob_bot = first_bar['High'], first_bar['Low']
-        increment = (ob_top - ob_bot) / AMOUNT_OF_BOXES
-        box_volumes = [0.0] * AMOUNT_OF_BOXES
+    # Bearish OB: แท่งแรกเขียว + 4 แท่งหลังแดง
+    is_bear_ob = (first_bar['Close'] > first_bar['Open']) and all(sub_df.iloc[1:]['Close'] <= sub_df.iloc[1:]['Open'])
+    # Bullish OB: แท่งแรกแดง + 4 แท่งหลังเขียว
+    is_bull_ob = (first_bar['Close'] < first_bar['Open']) and all(sub_df.iloc[1:]['Close'] >= sub_df.iloc[1:]['Open'])
+    
+    if not (is_bear_ob or is_bull_ob):
+        return None
         
-        for _, row in sub_df.iterrows():
-            c_high, c_low, c_vol = row['High'], row['Low'], row['Volume']
-            ltf_diff = c_high - c_low if c_high != c_low else 0.0001
-            for b_idx in range(AMOUNT_OF_BOXES):
-                top_grid = ob_top - (increment * b_idx)
-                bot_grid = ob_top - (increment * (b_idx + 1))
-                if c_low <= top_grid and c_high >= bot_grid:
-                    reg_diff = min(c_high, top_grid) - max(c_low, bot_grid)
-                    box_volumes[b_idx] += (reg_diff / ltf_diff) * c_vol
-        
-        max_vol_idx = int(np.argmax(box_volumes))
-        poc_top = ob_top - (increment * max_vol_idx)
-        poc_bot = ob_top - (increment * (max_vol_idx + 1))
-        poc_midpoint = (poc_top + poc_bot) / 2  # 50% Midpoint of POC
-        return {'ob_top': ob_top, 'ob_bot': ob_bot, 'poc_midpoint': poc_midpoint}
-    return None
+    direction = 'SHORT' if is_bear_ob else 'LONG'
+    ob_top, ob_bot = first_bar['High'], first_bar['Low']
+    increment = (ob_top - ob_bot) / AMOUNT_OF_BOXES
+    box_volumes = [0.0] * AMOUNT_OF_BOXES
+    
+    for _, row in sub_df.iterrows():
+        c_high, c_low, c_vol = row['High'], row['Low'], row['Volume']
+        ltf_diff = c_high - c_low if c_high != c_low else 0.0001
+        for b_idx in range(AMOUNT_OF_BOXES):
+            top_grid = ob_top - (increment * b_idx)
+            bot_grid = ob_top - (increment * (b_idx + 1))
+            if c_low <= top_grid and c_high >= bot_grid:
+                reg_diff = min(c_high, top_grid) - max(c_low, bot_grid)
+                box_volumes[b_idx] += (reg_diff / ltf_diff) * c_vol
+                
+    max_vol_idx = int(np.argmax(box_volumes))
+    poc_top = ob_top - (increment * max_vol_idx)
+    poc_bot = ob_top - (increment * (max_vol_idx + 1))
+    poc_midpoint = (poc_top + poc_bot) / 2
+    
+    return {
+        'direction': direction,
+        'ob_top': ob_top,
+        'ob_bot': ob_bot,
+        'poc_midpoint': poc_midpoint
+    }
 
 
 # ==========================================
-# 4. EXECUTION & ALERT GENERATOR
+# 4. EXECUTION & DEDUPLICATION
 # ==========================================
 def run_scanner():
-    print("🔎 กำลังดึงข้อมูล OANDA:XAUUSD (M30)...")
     df = fetch_gold_data_tv()
     if df is None: return
     
     last_candle_time = df.index[-1].strftime('%Y-%m-%d %H:%M')
-    current_price = df['Close'].iloc[-1]
     
+    # Deduplication Guard: เช็คว่าแท่งเวลานี้เคยส่ง Alert ไปหรือยัง
+    if os.path.exists(LAST_ALERT_FILE):
+        with open(LAST_ALERT_FILE, 'r') as f:
+            if f.read().strip() == last_candle_time:
+                print(f"ℹ️ [{last_candle_time}] แท่งนี้เคยส่ง Alert ไปแล้ว - ข้ามการทำงาน")
+                return
+
+    current_price = df['Close'].iloc[-1]
     p_highs, p_lows = find_pivots(df)
-    swept_info = check_recent_swept_eqh(df, p_highs)
+    swept_info = check_swept_liquidity(df, p_highs, p_lows)
     ob_info = calculate_ob_poc(df)
     
-    if swept_info or ob_info:
-        entry_price = ob_info['poc_midpoint'] if ob_info else swept_info['swept_level']
+    # ตรวจสอบทิศทางให้ตรงกันระหว่าง Swept และ OB
+    setup_direction = None
+    if swept_info and ob_info and (swept_info['direction'] == ob_info['direction']):
+        setup_direction = swept_info['direction']
+    elif ob_info:
+        setup_direction = ob_info['direction']
+    elif swept_info:
+        setup_direction = swept_info['direction']
         
-        # Filter: ราคาวิ่งออกห่างเกิน $2.0 ไม่ส่ง Alert
+    if setup_direction:
+        entry_price = ob_info['poc_midpoint'] if ob_info else swept_info['level']
+        
+        # Safe SL Calculation (แยกตาม Direction ชัดเจน)
+        if setup_direction == 'SHORT':
+            high_bounds = [p for p in [ob_info['ob_top'] if ob_info else None, swept_info['level'] if swept_info else None] if p is not None]
+            sl_price = max(high_bounds) + 1.5
+            tp_price = entry_price - ((sl_price - entry_price) * 3)
+        else: # LONG
+            low_bounds = [p for p in [ob_info['ob_bot'] if ob_info else None, swept_info['level'] if swept_info else None] if p is not None]
+            sl_price = min(low_bounds) - 1.5
+            tp_price = entry_price + ((entry_price - sl_price) * 3)
+
+        # Filter: ราคาวิ่งออกห่างเกินกำหนด ไม่ส่ง Alert
         if abs(current_price - entry_price) > MAX_ENTRY_DISTANCE:
-            print(f"⚠️ สแกนพบ Setup แต่ราคาวิ่งเลยจุด Entry ({entry_price:.2f}) ไปแล้ว - ข้ามการส่ง Alert")
+            print(f"⚠️ สแกนพบ Setup {setup_direction} แต่ราคาวิ่งเลยจุด Entry ไปแล้ว - ข้ามการส่ง Alert")
             return
             
-        sl_price = max(swept_info['swept_level'] if swept_info else 0, ob_info['ob_top'] if ob_info else 0) + 1.5
-        tp_price = entry_price - ((sl_price - entry_price) * 3)  # Risk:Reward 1:3
-        
         message = (
             f"🔔 *พบ Setup เทรด: XAUUSD (M30)*\n"
             f"📅 *Candle Time:* `{last_candle_time} (TH)`\n"
             f"----------------------------------\n"
-            f"🎯 *Direction:* SHORT (Bearish Setup)\n"
+            f"🎯 *Direction:* {setup_direction}\n"
             f"📍 *Current Price:* {current_price:.2f}\n"
             f"📊 *50% POC Entry:* `{entry_price:.2f}`\n"
             f"🛑 *Suggested SL:* `{sl_price:.2f}`\n"
             f"🟢 *Suggested TP (1:3):* `{tp_price:.2f}`\n"
             f"----------------------------------\n"
-            f"⚠️ *Note:* ตั้ง Sell Limit ดักไว้ และลบออเดอร์ทันทีหากราคาวิ่งลงไปชน TP ก่อนเกี่ยว"
+            f"⚠️ *Note:* ตั้งวาง Limit Order ดักไว้ และลบออเดอร์ทันทีหากราคาวิ่งชน TP ก่อนเกี่ยว"
         )
         send_telegram_alert(message)
-        print("✅ สแกนพบ Setup และส่งแจ้งเตือน Telegram เรียบร้อย!")
+        
+        # บันทึก Timestamp ว่าส่ง Alert ของแท่งนี้แล้ว
+        with open(LAST_ALERT_FILE, 'w') as f:
+            f.write(last_candle_time)
+        print("✅ ส่งแจ้งเตือนเรียบร้อย!")
     else:
         print(f"ℹ️ [{last_candle_time}] ไม่พบ Setup ตามเงื่อนไขในแท่งปัจจุบัน")
 
