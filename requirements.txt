@@ -1,4 +1,4 @@
-git+https://github.com/BEPb/tvdatafeed.git
+https://github.com/BEPb/tvdatafeed/archive/refs/heads/main.zip
 pandas
 numpy
 requests
