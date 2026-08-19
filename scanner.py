@@ -68,7 +68,6 @@ def find_pivots(df):
     return p_highs, p_lows
 
 def check_swept_liquidity(df, p_highs, p_lows):
-    """เช็คทั้ง Swept EQH (Bearish) และ Swept EQL (Bullish)"""
     latest_high = df['High'].iloc[-1]
     latest_low = df['Low'].iloc[-1]
     latest_close = df['Close'].iloc[-1]
@@ -96,14 +95,11 @@ def check_swept_liquidity(df, p_highs, p_lows):
     return None
 
 def calculate_ob_poc(df):
-    """ตรวจหา Order Block + POC ทั้ง Bullish และ Bearish"""
     if len(df) < TUNING: return None
     sub_df = df.iloc[-TUNING:]
     first_bar = sub_df.iloc[0]
     
-    # Bearish OB: แท่งแรกเขียว + 4 แท่งหลังแดง
     is_bear_ob = (first_bar['Close'] > first_bar['Open']) and all(sub_df.iloc[1:]['Close'] <= sub_df.iloc[1:]['Open'])
-    # Bullish OB: แท่งแรกแดง + 4 แท่งหลังเขียว
     is_bull_ob = (first_bar['Close'] < first_bar['Open']) and all(sub_df.iloc[1:]['Close'] >= sub_df.iloc[1:]['Open'])
     
     if not (is_bear_ob or is_bull_ob):
@@ -146,7 +142,7 @@ def run_scanner():
     
     last_candle_time = df.index[-1].strftime('%Y-%m-%d %H:%M')
     
-    # Deduplication Guard: เช็คว่าแท่งเวลานี้เคยส่ง Alert ไปหรือยัง
+    # Deduplication Guard
     if os.path.exists(LAST_ALERT_FILE):
         with open(LAST_ALERT_FILE, 'r') as f:
             if f.read().strip() == last_candle_time:
@@ -158,10 +154,15 @@ def run_scanner():
     swept_info = check_swept_liquidity(df, p_highs, p_lows)
     ob_info = calculate_ob_poc(df)
     
-    # ตรวจสอบทิศทางให้ตรงกันระหว่าง Swept และ OB
+    # Resolve direction & filter out conflicting swept_info
     setup_direction = None
-    if swept_info and ob_info and (swept_info['direction'] == ob_info['direction']):
-        setup_direction = swept_info['direction']
+    if swept_info and ob_info:
+        if swept_info['direction'] == ob_info['direction']:
+            setup_direction = swept_info['direction']
+        else:
+            # หากทิศทางขัดกัน ตัด swept_info ทิ้ง ไม่นำ level มาคำนวณ SL ข้ามฝั่ง
+            swept_info = None 
+            setup_direction = ob_info['direction']
     elif ob_info:
         setup_direction = ob_info['direction']
     elif swept_info:
@@ -170,7 +171,6 @@ def run_scanner():
     if setup_direction:
         entry_price = ob_info['poc_midpoint'] if ob_info else swept_info['level']
         
-        # Safe SL Calculation (แยกตาม Direction ชัดเจน)
         if setup_direction == 'SHORT':
             high_bounds = [p for p in [ob_info['ob_top'] if ob_info else None, swept_info['level'] if swept_info else None] if p is not None]
             sl_price = max(high_bounds) + 1.5
@@ -180,7 +180,6 @@ def run_scanner():
             sl_price = min(low_bounds) - 1.5
             tp_price = entry_price + ((entry_price - sl_price) * 3)
 
-        # Filter: ราคาวิ่งออกห่างเกินกำหนด ไม่ส่ง Alert
         if abs(current_price - entry_price) > MAX_ENTRY_DISTANCE:
             print(f"⚠️ สแกนพบ Setup {setup_direction} แต่ราคาวิ่งเลยจุด Entry ไปแล้ว - ข้ามการส่ง Alert")
             return
@@ -199,7 +198,6 @@ def run_scanner():
         )
         send_telegram_alert(message)
         
-        # บันทึก Timestamp ว่าส่ง Alert ของแท่งนี้แล้ว
         with open(LAST_ALERT_FILE, 'w') as f:
             f.write(last_candle_time)
         print("✅ ส่งแจ้งเตือนเรียบร้อย!")
