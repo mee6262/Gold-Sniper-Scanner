@@ -72,7 +72,6 @@ def calculate_volume_activity(df, lookback=48):
 
 def get_market_session(dt_th):
     hour = dt_th.hour
-    # เวลาไทย (UTC+7)
     if 14 <= hour < 19:
         return "London Session 🇬🇧"
     elif 19 <= hour < 22:
@@ -88,15 +87,65 @@ def get_market_session(dt_th):
 # ==========================================
 # 4. CORE ANALYTICS ENGINE (DYNAMIC SMC)
 # ==========================================
+def find_pivots(df):
+    highs, lows, volumes = df['High'].values, df['Low'].values, df['Volume'].values
+    n = len(df)
+    p_highs, p_lows = [], []
+    for i in range(PIVOT_LEFT, n - PIVOT_RIGHT):
+        if all(highs[i] > highs[i - PIVOT_LEFT:i]) and all(highs[i] > highs[i + 1:i + PIVOT_RIGHT + 1]):
+            p_highs.append((i, highs[i], volumes[i]))
+        if all(lows[i] < lows[i - PIVOT_LEFT:i]) and all(lows[i] < lows[i + 1:i + PIVOT_RIGHT + 1]):
+            p_lows.append((i, lows[i], volumes[i]))
+    return p_highs, p_lows
+
+def check_swept_liquidity(df, p_highs, p_lows):
+    latest_high = df['High'].iloc[-1]
+    latest_low = df['Low'].iloc[-1]
+    latest_close = df['Close'].iloc[-1]
+    
+    # Check Bearish Swept EQH
+    if len(p_highs) >= 2:
+        for i in range(len(p_highs) - 1, 0, -1):
+            _, price2, _ = p_highs[i]
+            _, price1, _ = p_highs[i - 1]
+            if abs(price2 - price1) / price1 * 100 <= THRESHOLD_PCT:
+                eqh_top = max(price1, price2)
+                if latest_high > eqh_top and latest_close < eqh_top:
+                    return {'direction': 'SHORT', 'level': eqh_top}
+                    
+    # Check Bullish Swept EQL
+    if len(p_lows) >= 2:
+        for i in range(len(p_lows) - 1, 0, -1):
+            _, price2, _ = p_lows[i]
+            _, price1, _ = p_lows[i - 1]
+            if abs(price2 - price1) / price1 * 100 <= THRESHOLD_PCT:
+                eql_bot = min(price1, price2)
+                if latest_low < eql_bot and latest_close > eql_bot:
+                    return {'direction': 'LONG', 'level': eql_bot}
+                    
+    return None
+
+def check_fvg(df):
+    if len(df) < 3: return None
+    c1_high, c1_low = df['High'].iloc[-3], df['Low'].iloc[-3]
+    c3_high, c3_low = df['High'].iloc[-1], df['Low'].iloc[-1]
+    
+    # Bullish FVG
+    if c3_low > c1_high:
+        gap_mid = (c3_low + c1_high) / 2
+        return {'direction': 'LONG', 'level': gap_mid, 'top': c3_low, 'bot': c1_high}
+        
+    # Bearish FVG
+    if c3_high < c1_low:
+        gap_mid = (c3_high + c1_low) / 2
+        return {'direction': 'SHORT', 'level': gap_mid, 'top': c1_low, 'bot': c3_high}
+        
+    return None
+
 def calculate_ob_poc(df):
-    """
-    Dynamic Order Block (SMC Standard):
-    หาแท่งสีตรงข้ามย้อนหลังในระยะ 6 แท่งล่าสุด ที่มีแท่ง Impulse พุ่งออกไป
-    """
     n = len(df)
     if n < 10: return None
     
-    # สแกนย้อนหลังจากแท่งล่าสุดกลับไป 6 แท่ง
     for i in range(2, 7):
         target_bar = df.iloc[-i]
         next_bar = df.iloc[-i+1]
@@ -107,22 +156,19 @@ def calculate_ob_poc(df):
         avg_body = abs(df['Close'] - df['Open']).iloc[-20:].mean()
         next_body = abs(next_bar['Close'] - next_bar['Open'])
         
-        # Bullish OB: แท่งแดง ที่ถูกแท่งเขียวถัดมาพุ่งกลืน (Engulfing/Impulse)
         if is_red and (next_bar['Close'] > next_bar['Open']) and (next_body > avg_body * 1.2):
             direction = 'LONG'
             ob_top, ob_bot = target_bar['High'], target_bar['Low']
-            sub_df = df.iloc[n-i : n-i+2]  # ✅ แก้ไข: ใช้ index ฝั่งบวก ป้องกัน iloc[-2:0] คายค่าว่าง
+            sub_df = df.iloc[n-i : n-i+2]
             break
-        # Bearish OB: แท่งเขียว ที่ถูกแท่งแดงถัดมาพุ่งกลืน
         elif is_green and (next_bar['Close'] < next_bar['Open']) and (next_body > avg_body * 1.2):
             direction = 'SHORT'
             ob_top, ob_bot = target_bar['High'], target_bar['Low']
-            sub_df = df.iloc[n-i : n-i+2]  # ✅ แก้ไข: ใช้ index ฝั่งบวก
+            sub_df = df.iloc[n-i : n-i+2]
             break
     else:
         return None
 
-    # คำนวณ POC 10 ช่องย่อยภายในกรอบ OB
     increment = (ob_top - ob_bot) / AMOUNT_OF_BOXES
     if increment <= 0: return None
     box_volumes = [0.0] * AMOUNT_OF_BOXES
@@ -160,7 +206,6 @@ def run_scanner():
     last_candle_dt = df.index[-1]
     last_candle_time = last_candle_dt.strftime('%Y-%m-%d %H:%M')
     
-    # Deduplication Guard
     if os.path.exists(LAST_ALERT_FILE):
         with open(LAST_ALERT_FILE, 'r') as f:
             if f.read().strip() == last_candle_time:
@@ -170,7 +215,6 @@ def run_scanner():
     current_price = df['Close'].iloc[-1]
     p_highs, p_lows = find_pivots(df)
     
-    # ดึงค่าจาก Analytics Engine ต่างๆ
     swept_info = check_swept_liquidity(df, p_highs, p_lows)
     ob_info = calculate_ob_poc(df)
     fvg_info = check_fvg(df)
@@ -178,13 +222,11 @@ def run_scanner():
     vol_activity = calculate_volume_activity(df)
     market_session = get_market_session(last_candle_dt)
 
-    # รวมสัญญาณและประเมินทิศทางหลัก
     signals = [s for s in [swept_info, ob_info, fvg_info] if s is not None]
     if not signals:
         print(f"ℹ️ [{last_candle_time}] ไม่พบ Setup ตามเงื่อนไขในแท่งปัจจุบัน")
         return
 
-    # ตรวจสอบ Confluence Direction
     directions = [s['direction'] for s in signals]
     long_count = directions.count('LONG')
     short_count = directions.count('SHORT')
@@ -197,7 +239,6 @@ def run_scanner():
         print(f"ℹ️ [{last_candle_time}] สัญญาณขัดแย้งกัน (Long vs Short) - ข้ามการส่ง Alert")
         return
 
-    # คำนวณจุด Entry, SL, TP
     confluence_reasons = []
     entry_candidates = []
     
@@ -238,7 +279,6 @@ def run_scanner():
             print(f"⚠️ พบ Long Setup แต่ราคาปิดทะลุ SL ({sl_price:.2f}) ลงไปแล้ว - ข้าม")
             return
 
-    # สร้างข้อความแจ้งเตือน Telegram
     reasons_str = " + ".join(confluence_reasons)
     message = (
         f"🚨 *พบ Trade Setup: XAUUSD (M30)*\n"
