@@ -2,4 +2,5 @@ pandas
 numpy
 requests
 pytz
-git+https://github.com/mbalert/tvDatafeed.git
+websocket-client
+git+https://github.com/brian-the-dev/python-tvdatafeed.git
