@@ -38,5 +38,6 @@ jobs:
           if [ -f .last_alert_time ]; then
             git add .last_alert_time
             git commit -m "update alert state [skip ci]" || exit 0
-            git push
+            git pull --rebase origin main
+            git push || true
           fi
