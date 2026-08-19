@@ -1,5 +1,5 @@
-git+https://github.com/rongardF/tvdatafeed.git
 pandas
 numpy
 requests
 pytz
+git+https://github.com/mbalert/tvDatafeed.git
