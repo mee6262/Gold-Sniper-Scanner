@@ -1,26 +1,21 @@
-name: Gold Sniper ScannerICT
+name: XAUUSD SMC Scanner
+
 on:
   schedule:
-    # 🎯 แผนใหม่: สแกนทุก 30 นาที (at :00 และ :30) 
-    # 🎯 เฉพาะชั่วโมงที่ 01:00 - 19:30 UTC (ซึ่งตรงกับ 08:00 - 02:30 ICT เวลาไทย)
-    # 🎯 และรันเฉพาะวันจันทร์ - ศุกร์ (1-5) เพื่อหยุดเสาร์-อาทิตย์
-    - cron: '0,30 1-19 * * 1-5'
-    
-  # อนุญาตให้กดรันเองแบบ Manual ได้ตลอดเวลาผ่านหน้าเว็บ GitHub
-  workflow_dispatch:
+    # รันทุกๆ นาทีที่ 00 และ 30 (ทุก 30 นาที ตรงเวลาปิดแท่ง)
+    - cron: '0,30 * * * *'
+  workflow_dispatch: # ปุ่มกดรันเองมือหมุนบน GitHub
 
 jobs:
-  scan:
+  run-scanner:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
@@ -29,20 +24,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Scanner Script
+      - name: Run Gold Scanner
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scanner.py
 
-      - name: Save Deduplication State
-        # เพิ่ม Guard ป้องกันไฟล์ .last_alert_time ถูกลบโดยไม่ได้ตั้งใจ
+      - name: Save Alert State (Deduplication)
         run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          if [ -f .last_alert_time ]; then
-            git add .last_alert_time
-            git commit -m "update alert state [skip ci]" || exit 0
-            git pull --rebase origin main
-            git push || true
-          fi
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .last_alert_time || true
+          git commit -m "update last alert state [skip ci]" || true
+          git push || true
