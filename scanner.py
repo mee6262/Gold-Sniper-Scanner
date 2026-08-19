@@ -14,7 +14,6 @@ AMOUNT_OF_BOXES = 10      # ซอย OB เป็น 10 ช่องย่อ�
 PIVOT_LEFT = 8            # Liquidity Pivot Left
 PIVOT_RIGHT = 3           # Liquidity Pivot Right
 THRESHOLD_PCT = 0.03      # Equality Threshold (%)
-MAX_ENTRY_DISTANCE = 2.0  # ถ้าราคาห่างจาก Entry เกิน $2.0 (200 จุด) ไม่ส่ง Alert
 LAST_ALERT_FILE = ".last_alert_time"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -190,14 +189,20 @@ def run_scanner():
             high_bounds = [p for p in [ob_info['ob_top'] if ob_info else None, swept_info['level'] if swept_info else None] if p is not None]
             sl_price = max(high_bounds) + 1.5
             tp_price = entry_price - ((sl_price - entry_price) * 3)
+            
+            # Structure Invalidation Check: ปิดทะลุ SL ขึ้นไปแล้วค่อยข้าม
+            if current_price > sl_price:
+                print(f"⚠️ สแกนพบ Short Setup แต่ราคาปิดทะลุ SL ({sl_price:.2f}) ขึ้นไปแล้ว - ข้ามการส่ง Alert")
+                return
         else: # LONG
             low_bounds = [p for p in [ob_info['ob_bot'] if ob_info else None, swept_info['level'] if swept_info else None] if p is not None]
             sl_price = min(low_bounds) - 1.5
             tp_price = entry_price + ((entry_price - sl_price) * 3)
-
-        if abs(current_price - entry_price) > MAX_ENTRY_DISTANCE:
-            print(f"⚠️ สแกนพบ Setup {setup_direction} แต่ราคาวิ่งเลยจุด Entry ไปแล้ว - ข้ามการส่ง Alert")
-            return
+            
+            # Structure Invalidation Check: ปิดทะลุ SL ลงไปแล้วค่อยข้าม
+            if current_price < sl_price:
+                print(f"⚠️ สแกนพบ Long Setup แต่ราคาปิดทะลุ SL ({sl_price:.2f}) ลงไปแล้ว - ข้ามการส่ง Alert")
+                return
             
         message = (
             f"🔔 *พบ Setup เทรด: XAUUSD (M30)*\n"
