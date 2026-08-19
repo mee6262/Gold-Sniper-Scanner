@@ -5,8 +5,7 @@
 ## 📌 Features & Strategies
 - **Data Feed:** ดึงราคาเรียลไทม์ตรงจาก `OANDA:XAUUSD` (M30)
 - **Logic:** ตรวจจับ Liquidity Swept (EQH/EQL) ร่วมกับ Volume Profile Order Block 10 Grids (หาจุด 50% POC)
-- **Filters:** ป้องกันการส่ง Alert ราคาวิ่งเลยจุดเข้าเกิน $2.0 (200 จุด) และมีระบบ Deduplication กันสแปมข้อความซ้ำ
-- **Automation:** รันอัตโนมัติทุก 15 นาทีผ่าน GitHub Actions (Serverless)
+- **Automation:** รันอัตโนมัติทุก 30 นาทีผ่าน GitHub Actions (Serverless)
 
 ## ⚙️ Required Repository Secrets
 ตั้งค่าใน **Settings > Secrets and variables > Actions**:
