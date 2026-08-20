@@ -1,64 +1,48 @@
-"""Persistent Gold Sniper runtime using MT5 as the market-data source."""
+"""Persistent MT5-native Gold Sniper runtime. No TradingView dependency."""
 from __future__ import annotations
-
-import logging
-import time
-
+import logging, os, time
+import requests
 from data_manager import MT5DataManager
+from mt5_sniper_engine import MT5SniperEngine, format_alert, AI_MIN_SCORE
 
-POLL_SECONDS = 5
+POLL_SECONDS=int(os.getenv("POLL_SECONDS","5"))
+logging.basicConfig(level=logging.INFO,format="%(asctime)s | %(levelname)s | %(message)s")
+log=logging.getLogger("gold-sniper")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-log = logging.getLogger("gold-sniper")
+def telegram(message):
+    token,chat=os.getenv("TELEGRAM_TOKEN"),os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        log.info("TELEGRAM disabled; candidate:\n%s",message); return
+    try:
+        r=requests.post(f"https://api.telegram.org/bot{token}/sendMessage",json={"chat_id":chat,"text":message},timeout=10)
+        r.raise_for_status()
+    except Exception as exc: log.error("Telegram error: %s",exc)
 
-
-def run() -> None:
-    manager = MT5DataManager()
-    manager.start()
-    log.info("MT5 READY: %s", manager.health())
-    last_m5 = None
-
+def run():
+    manager=MT5DataManager(); manager.start(); engine=MT5SniperEngine(manager)
+    log.info("MT5 READY: %s",manager.health())
     try:
         while True:
             try:
-                tick = manager.tick()
-                changes = manager.refresh_changed()
-                m5_time = manager.last_bar_time.get("M5")
-
-                if m5_time != last_m5:
-                    last_m5 = m5_time
-                    snap = manager.snapshot()
-                    log.info(
-                        "NEW M5 | %s | bid=%.3f ask=%.3f spread=%.3f | M15=%s M30=%s",
-                        m5_time,
-                        tick.bid,
-                        tick.ask,
-                        tick.spread,
-                        snap["M15"].iloc[-1]["Time"],
-                        snap["M30"].iloc[-1]["Time"],
-                    )
+                changes=manager.refresh_changed()
+                candidate=engine.scan_if_new()
+                if candidate:
+                    log.info("CANDIDATE %s score=%.1f RR=%.2f",candidate["direction"],candidate["score"],candidate["rr"])
+                    if candidate["score"]>=AI_MIN_SCORE:
+                        telegram(format_alert(candidate))
+                        log.info("AI_GATE READY (AI review will be added next phase)")
+                    else:
+                        log.info("Candidate below AI threshold: %.1f < %.1f",candidate["score"],AI_MIN_SCORE)
                 elif any(changes.values()):
-                    log.info("TF UPDATE %s", changes)
-
+                    log.info("TF UPDATE %s",changes)
             except Exception as exc:
-                log.exception("runtime error: %s", exc)
+                log.exception("runtime error: %s",exc)
                 try:
-                    manager.stop()
-                    time.sleep(2)
-                    manager.start()
+                    manager.stop(); time.sleep(2); manager.start()
                 except Exception as reconnect_exc:
-                    log.error("MT5 reconnect failed: %s", reconnect_exc)
-                    time.sleep(10)
-
+                    log.error("MT5 reconnect failed: %s",reconnect_exc); time.sleep(10)
             time.sleep(POLL_SECONDS)
-    except KeyboardInterrupt:
-        log.info("Stopping Gold Sniper...")
-    finally:
-        manager.stop()
+    except KeyboardInterrupt: log.info("Stopping Gold Sniper...")
+    finally: manager.stop()
 
-
-if __name__ == "__main__":
-    run()
+if __name__=="__main__": run()
