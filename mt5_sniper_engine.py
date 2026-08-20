@@ -1,7 +1,6 @@
 """MT5-native Gold Sniper engine. No TradingView dependency."""
 from __future__ import annotations
 import os
-from dataclasses import asdict
 from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
@@ -23,7 +22,7 @@ def atr(df, period=ATR_PERIOD):
     if df is None or len(df) < period + 1:
         return float("nan")
     prev = df.Close.shift(1)
-    tr = pd.concat([df.High-df.Low, (df.High-prev).abs(), (df.Low-prev).abs()], axis=1).max(axis=1)
+    tr = pd.concat([df.High-df.Low, (df.Low-prev).abs(), (df.High-prev).abs()], axis=1).max(axis=1)
     return float(tr.rolling(period).mean().iloc[-1])
 
 
@@ -111,17 +110,12 @@ def in_or_near_zone(price, zone, buffer):
     return zone["low"]-buffer <= price <= zone["high"]+buffer
 
 
-def build_candidate(data: Dict[str,pd.DataFrame], tick=None) -> Optional[Dict[str,Any]]:
-    required = ("M30","M15","M5")
-    if any(tf not in data or data[tf] is None or len(data[tf]) < MIN_STRUCTURE_BARS for tf in required):
-        return None
-    ss = {tf:structure(data[tf]) for tf in required}
-    sw = {tf:sweep(data[tf]) for tf in required}
-    zones = {tf:[z for z in (fvg(data[tf],tf), order_block(data[tf],tf)) if z] for tf in required}
-    price = float(tick.last if tick else data["M5"].Close.iloc[-1])
+def _base_analysis(data):
+    ss = {tf:structure(data[tf]) for tf in ("M30","M15","M5")}
+    sw = {tf:sweep(data[tf]) for tf in ("M30","M15","M5")}
+    zones = {tf:[z for z in (fvg(data[tf],tf), order_block(data[tf],tf)) if z] for tf in ("M30","M15","M5")}
+    price = float(data["M5"].Close.iloc[-1])
     av = atr(data["M5"])
-    if not np.isfinite(av) or av <= 0:
-        return None
     best = None
     for direction in ("LONG","SHORT"):
         want = "BULLISH" if direction == "LONG" else "BEARISH"
@@ -136,28 +130,52 @@ def build_candidate(data: Dict[str,pd.DataFrame], tick=None) -> Optional[Dict[st
         if ss["M5"]["mss"] == want: score += 5; reasons.append("M5_MSS")
         if any(z["direction"] == direction and z["kind"] == "FVG" for z in zones["M5"]): score += 5; reasons.append("M5_FVG")
         item = (score, direction, reasons)
-        if best is None or item[0] > best[0]:
-            best = item
+        if best is None or item[0] > best[0]: best = item
     score, direction, reasons = best
-    if score < MIN_SCORE:
-        return None
-
-    # New sniper gate: location first, trigger second.
     directional_zones = [z for tf in ("M5","M15","M30") for z in zones[tf] if z["direction"] == direction]
-    location_zone = next((z for z in directional_zones if in_or_near_zone(price, z, LOCATION_ATR_BUFFER*av)), None)
-    if location_zone is None:
-        return None
+    location_zone = next((z for z in directional_zones if np.isfinite(av) and in_or_near_zone(price, z, LOCATION_ATR_BUFFER*av)), None)
+    want = "BULLISH" if direction == "LONG" else "BEARISH"
+    trigger = bool((sw["M5"] and sw["M5"]["direction"] == direction) or (ss["M5"]["mss"] == want and any(z["direction"] == direction and z["kind"] == "FVG" for z in zones["M5"])))
+    return {"score":score,"direction":direction,"reasons":reasons,"price":price,"atr":av,"zones":zones,"structure":ss,"sweeps":sw,"location_zone":location_zone,"trigger":trigger}
+
+
+def diagnose_gates(data: Dict[str,pd.DataFrame]) -> Dict[str,Any]:
+    """Research-only gate diagnostics. No orders and no look-ahead.
+    Reports the selected direction's score/location/trigger plus raw LONG/SHORT scores.
+    """
+    required = ("M30","M15","M5")
+    if any(tf not in data or data[tf] is None or len(data[tf]) < MIN_STRUCTURE_BARS for tf in required):
+        return {"valid":False}
+    a = _base_analysis(data)
+    return {
+        "valid":True,
+        "direction":a["direction"],
+        "score":a["score"],
+        "score_pass":a["score"] >= MIN_SCORE,
+        "location":a["location_zone"] is not None,
+        "trigger":a["trigger"],
+        "final_gate":a["score"] >= MIN_SCORE and a["location_zone"] is not None and (a["trigger"] or not REQUIRE_TRIGGER),
+        "location_zone":a["location_zone"],
+        "reasons":a["reasons"],
+    }
+
+
+def build_candidate(data: Dict[str,pd.DataFrame], tick=None) -> Optional[Dict[str,Any]]:
+    required = ("M30","M15","M5")
+    if any(tf not in data or data[tf] is None or len(data[tf]) < MIN_STRUCTURE_BARS for tf in required): return None
+    a = _base_analysis(data)
+    score, direction, reasons = a["score"], a["direction"], list(a["reasons"])
+    ss, sw, zones, price, av = a["structure"], a["sweeps"], a["zones"], a["price"], a["atr"]
+    if not np.isfinite(av) or av <= 0 or score < MIN_SCORE: return None
+    location_zone = a["location_zone"]
+    if location_zone is None: return None
     reasons.append("LOCATION")
-
-    trigger = False
-    if sw["M5"] and sw["M5"]["direction"] == direction:
-        trigger = True; reasons.append("M5_TRIGGER_SWEEP")
-    elif ss["M5"]["mss"] == want and any(z["direction"] == direction and z["kind"] == "FVG" for z in zones["M5"]):
-        trigger = True; reasons.append("M5_TRIGGER_MSS_FVG")
-    if REQUIRE_TRIGGER and not trigger:
-        return None
-
-    # Execution is now only generated after location + trigger, rather than at every confluence.
+    trigger = a["trigger"]
+    if trigger:
+        if sw["M5"] and sw["M5"]["direction"] == direction: reasons.append("M5_TRIGGER_SWEEP")
+        elif ss["M5"]["mss"] == ("BULLISH" if direction == "LONG" else "BEARISH"): reasons.append("M5_TRIGGER_MSS_FVG")
+    if REQUIRE_TRIGGER and not trigger: return None
+    directional_zones = [z for tf in ("M5","M15","M30") for z in zones[tf] if z["direction"] == direction]
     if direction == "LONG":
         sl = min([z["low"] for z in directional_zones] or [price-av]) - 0.15*av
         tp = max(price + MIN_RR*(price-sl), max([z["high"] for z in directional_zones if z["high"] > price] or [price+3*(price-sl)]))
@@ -165,16 +183,9 @@ def build_candidate(data: Dict[str,pd.DataFrame], tick=None) -> Optional[Dict[st
         sl = max([z["high"] for z in directional_zones] or [price+av]) + 0.15*av
         tp = min(price - MIN_RR*(sl-price), min([z["low"] for z in directional_zones if z["low"] < price] or [price-3*(sl-price)]))
     risk = abs(price-sl); rr = abs(tp-price)/max(risk,1e-9)
-    if not np.isfinite(risk) or risk <= 0 or rr < MIN_RR:
-        return None
+    if not np.isfinite(risk) or risk <= 0 or rr < MIN_RR: return None
     spread = float(tick.spread) if tick else None
-    return {
-        "symbol":SYMBOL,"direction":direction,"score":round(score,1),"reasons":reasons,
-        "price":price,"entry":price,"sl":float(sl),"tp":float(tp),"rr":round(rr,2),"spread":spread,
-        "session":session(data["M5"].Time.iloc[-1].to_pydatetime()),"location":location_zone,
-        "trigger":trigger,"structure":ss,"sweeps":sw,
-        "zones":zones,"candle_time":data["M5"].Time.iloc[-1].isoformat()
-    }
+    return {"symbol":SYMBOL,"direction":direction,"score":round(score,1),"reasons":reasons,"price":price,"entry":price,"sl":float(sl),"tp":float(tp),"rr":round(rr,2),"spread":spread,"session":session(data["M5"].Time.iloc[-1].to_pydatetime()),"location":location_zone,"trigger":trigger,"structure":ss,"sweeps":sw,"zones":zones,"candle_time":data["M5"].Time.iloc[-1].isoformat()}
 
 
 class MT5SniperEngine:
