@@ -1,53 +1,100 @@
-"""Historical replay harness for Gold Sniper Engine.
+"""Historical replay harness for the MT5-native Gold Sniper engine.
 
-Reads historical M5/M15/M30 data directly from the connected MT5 terminal,
-feeds closed M5 candles through the existing engine, and reports candidates.
-No orders are sent. AI/Telegram are intentionally not called by this harness.
+Safe test only:
+- reads historical M5/M15/M30 data from the connected MT5 terminal
+- replays CLOSED M5 candles from oldest to newest
+- aligns M15/M30 strictly to information that was available at that time
+- reports candidates
+- never calls AI, Telegram, or OrderSend
 """
 from __future__ import annotations
+
 import os
-from datetime import datetime, timezone
+from datetime import timedelta
 
 from dotenv import load_dotenv
 import MetaTrader5 as mt5
+import pandas as pd
 
 from data_manager import MT5DataManager
-from mt5_sniper_engine import MT5SniperEngine, AI_MIN_SCORE
+from mt5_sniper_engine import build_candidate, MIN_SCORE
 
 load_dotenv()
 BARS = int(os.getenv("REPLAY_BARS", "500"))
+MIN_HISTORY = 40
 
 
-def main():
+def _history(manager: MT5DataManager, tf: str, count: int) -> pd.DataFrame:
+    """Fetch history through the manager's MT5 client without relying on manager.symbol."""
+    df = manager.client.bars(tf, count)
+    if df.empty:
+        raise RuntimeError(f"No {tf} history returned")
+    return df.sort_values("Time").reset_index(drop=True)
+
+
+def main() -> None:
     manager = MT5DataManager()
     manager.start()
     try:
-        symbol = manager.symbol
-        rates_m5 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 1, BARS)
-        if rates_m5 is None or len(rates_m5) == 0:
-            raise RuntimeError(f"No M5 history: {mt5.last_error()}")
+        symbol = manager.client.symbol
+        m5 = _history(manager, "M5", BARS)
+        m15 = _history(manager, "M15", max(BARS // 3 + 100, 150))
+        m30 = _history(manager, "M30", max(BARS // 6 + 100, 120))
 
-        engine = MT5SniperEngine(manager)
+        print(f"[REPLAY] symbol={symbol} M5={len(m5)} M15={len(m15)} M30={len(m30)} threshold={MIN_SCORE}")
+        print("[REPLAY] SAFE MODE: historical replay only; no AI, Telegram, or orders.")
+
         candidates = []
-        print(f"[REPLAY] symbol={symbol} bars={len(rates_m5)} threshold={AI_MIN_SCORE}")
+        scanned = 0
 
-        # The production engine operates on the latest closed candle. This harness
-        # validates the available history and reports the current engine result.
-        # Full historical feature reconstruction is deliberately kept separate so
-        # it cannot accidentally alter live-state caches.
-        candidate = engine.scan_if_new()
-        if candidate:
-            candidates.append(candidate)
-            print(
-                f"[REPLAY] CANDIDATE {candidate['direction']} "
-                f"score={candidate['score']:.1f} RR={candidate['rr']:.2f} "
-                f"entry={candidate['entry']:.3f} sl={candidate['sl']:.3f} tp={candidate['tp']:.3f}"
-            )
-        else:
-            print("[REPLAY] No candidate on current closed M5 candle.")
+        # Each M5 row represents a candle that is CLOSED at row.Time + 5 minutes.
+        # Higher-TF bars must also be closed before that scan time, otherwise the
+        # replay would leak future information into the signal.
+        for i in range(MIN_HISTORY, len(m5)):
+            m5_row = m5.iloc[i]
+            candle_time = pd.Timestamp(m5_row["Time"])
+            scan_time = candle_time + timedelta(minutes=5)
 
+            m5_hist = m5.iloc[: i + 1]
+            m15_hist = m15[m15["Time"] + timedelta(minutes=15) <= scan_time]
+            m30_hist = m30[m30["Time"] + timedelta(minutes=30) <= scan_time]
+
+            if len(m15_hist) < MIN_HISTORY or len(m30_hist) < MIN_HISTORY:
+                continue
+
+            data = {
+                "M5": m5_hist,
+                "M15": m15_hist.reset_index(drop=True),
+                "M30": m30_hist.reset_index(drop=True),
+            }
+            candidate = build_candidate(data, tick=None)
+            scanned += 1
+
+            if candidate:
+                candidate["replay_scan_time"] = scan_time.isoformat()
+                candidates.append(candidate)
+                print(
+                    f"[REPLAY] #{len(candidates)} {candidate['direction']} "
+                    f"score={candidate['score']:.1f} RR={candidate['rr']:.2f} "
+                    f"entry={candidate['entry']:.3f} sl={candidate['sl']:.3f} "
+                    f"tp={candidate['tp']:.3f} candle={candidate['candle_time']}"
+                )
+
+        print("\n[REPLAY] ===== SUMMARY =====")
+        print(f"[REPLAY] scanned={scanned}")
         print(f"[REPLAY] candidates={len(candidates)}")
-        print("[REPLAY] SAFE MODE: no AI call, no Telegram, no orders.")
+        if candidates:
+            top = sorted(candidates, key=lambda x: x["score"], reverse=True)[:10]
+            print("[REPLAY] top candidates:")
+            for n, c in enumerate(top, 1):
+                print(
+                    f"  {n}. {c['direction']} score={c['score']:.1f} "
+                    f"RR={c['rr']:.2f} candle={c['candle_time']} "
+                    f"reasons={','.join(c['reasons'])}"
+                )
+        else:
+            print("[REPLAY] No historical candidates met the current engine threshold.")
+
     finally:
         manager.stop()
 
