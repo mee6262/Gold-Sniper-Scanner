@@ -12,6 +12,13 @@ JOURNAL_FILE=os.getenv("SIGNAL_JOURNAL","signals.jsonl")
 logging.basicConfig(level=logging.INFO,format="%(asctime)s | %(levelname)s | %(message)s")
 log=logging.getLogger("gold-sniper")
 
+class ClosedCandleView:
+    """Engine view that excludes the currently-forming candle on every timeframe."""
+    def __init__(self, manager): self.manager=manager
+    def snapshot(self):
+        return {tf:df.iloc[:-1].copy() for tf,df in self.manager.snapshot().items() if len(df)>2}
+    def tick(self): return self.manager.tick()
+
 def telegram(message):
     token,chat=os.getenv("TELEGRAM_TOKEN"),os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat:
@@ -25,7 +32,7 @@ def journal(candidate, ai):
     with open(JOURNAL_FILE,"a",encoding="utf-8") as f: f.write(json.dumps(row,default=str)+"\n")
 
 def run():
-    manager=MT5DataManager(); manager.start(); engine=MT5SniperEngine(manager)
+    manager=MT5DataManager(); manager.start(); engine=MT5SniperEngine(ClosedCandleView(manager))
     log.info("MT5 READY: %s",manager.health())
     try:
         while True:
