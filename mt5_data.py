@@ -14,7 +14,7 @@ from typing import Dict, Optional
 import MetaTrader5 as mt5
 import pandas as pd
 
-SYMBOL = os.getenv("MT5_SYMBOL", "XAUUSD")
+SYMBOL = os.getenv("MT5_SYMBOL", "XAUUSDc")
 BARS = int(os.getenv("MT5_BARS", "500"))
 
 TF_MAP = {
