@@ -3,3 +3,4 @@ numpy
 requests
 pytz
 MetaTrader5
+python-dotenv
