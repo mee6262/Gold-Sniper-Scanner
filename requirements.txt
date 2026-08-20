@@ -2,5 +2,4 @@ pandas
 numpy
 requests
 pytz
-websocket-client
-git+https://github.com/rongardF/tvdatafeed.git@main
+MetaTrader5
