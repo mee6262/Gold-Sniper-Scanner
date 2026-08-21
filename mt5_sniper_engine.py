@@ -147,14 +147,19 @@ def diagnose_gates(data: Dict[str,pd.DataFrame]) -> Dict[str,Any]:
     if any(tf not in data or data[tf] is None or len(data[tf]) < MIN_STRUCTURE_BARS for tf in required):
         return {"valid":False}
     a = _base_analysis(data)
+    score_pass = a["score"] >= MIN_SCORE
+    location_pass = a["location_zone"] is not None
+    trigger_pass = a["trigger"]
+    final_pass = score_pass and location_pass and (trigger_pass or not REQUIRE_TRIGGER)
     return {
         "valid":True,
         "direction":a["direction"],
         "score":a["score"],
-        "score_pass":a["score"] >= MIN_SCORE,
-        "location":a["location_zone"] is not None,
-        "trigger":a["trigger"],
-        "final_gate":a["score"] >= MIN_SCORE and a["location_zone"] is not None and (a["trigger"] or not REQUIRE_TRIGGER),
+        "score_pass":score_pass,
+        "location":location_pass,
+        "trigger":trigger_pass,
+        "final":final_pass,
+        "final_gate":final_pass,
         "location_zone":a["location_zone"],
         "reasons":a["reasons"],
     }
