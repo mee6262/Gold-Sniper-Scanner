@@ -1,30 +1,55 @@
-# 🔱 XAUUSD Smart Money Concepts (SMC) Scanner
+# 🔱 Gold-Sniper-Scanner V2 — Hybrid Engine
 
-ระบบสแกนสัญญาณเทรดทองคำ (XAUUSD) บน Timeframe M30 แบบอัตโนมัติ พัฒนาด้วย Python และรันบน GitHub Actions พร้อมแจ้งเตือนผ่าน Telegram Bot โดยไม่มีค่าใช้จ่ายรายเดือน
+V2 is the current version of the Gold Sniper project. The legacy V1 scanner has been removed from this branch; V1 is maintained separately.
 
----
+## Architecture
 
-## 🌟 Key Features
+- **`gold_sniper_v2.py`** — core multi-timeframe SMC candidate engine
+- **`replay_test.py`** — historical replay / gate diagnostics / TP / expiry / management simulation
+- **`mt5_data.py`** — MT5 market-data integration
+- **`mt5_sniper_engine.py`** — MT5 sniper execution engine
+- **`data_manager.py`** — data handling utilities
+- **`runner_v2.py`** — V2 live runner
+- **`.env.example`** — configuration template
+- **`requirements.txt`** — Python dependencies
 
-* **Dynamic Order Block & POC Engine:** ตรวจหา Order Block ตามโครงสร้าง SMC พร้อมประมวลผล Volume Profile แบบ 10 ช่องย่อยเพื่อหาจุด **POC (Point of Control)**
-* **Fair Value Gap (FVG) Detection:** คำนวณหาจุด Imbalance บนโครงสร้างแท่งเทียนย้อนหลัง 3 แท่ง
-* **Liquidity Sweeps (EQH / EQL):** สแกนหาจุด Fakeout บริเวณ Equal Highs และ Equal Lows เพื่อจับจังหวะกวาด Liquidity
-* **Mxwll Volume & Session Filters:**
-  * **Volume Activity:** วัดเปอร์เซ็นต์ความหนาแน่นของ Volume ย้อนหลัง 24 ชั่วโมง (`Very High` / `High` / `Normal`)
-  * **Market Session Filter:** ระบุช่วงเวลาตลาด (London, NY, London/NY Overlap, Asia) เพื่อหลีกเลี่ยงช่วงไร้สภาพคล่อง
-* **Automated Risk Management:** คำนวณจุด Entry, Stop Loss (Buffer +1.5$) และ Take Profit (R:R 1:3) พร้อมระบบยกเลิกแจ้งเตือนหากราคาปิดทะลุ SL ไปก่อน
-* **Serverless & Zero Cost:** รันผ่าน GitHub Actions ทุกๆ 30 นาที (ตรงเวลาปิดแท่ง M30) พร้อมระบบ **Deduplication Guard** ป้องกันการยิงแจ้งเตือนซ้ำในแท่งเดิม
+## V2 Logic
 
----
+The engine analyzes **M30 + M15 + M5** and combines:
 
-## 📁 Project Structure
+- M30 directional bias and zones
+- M15 market-structure shift / sweep / FVG
+- M5 MSS / FVG trigger
+- location filtering
+- score threshold
+- RR validation
+- deterministic Entry / SL / TP construction
+- optional AI review after deterministic candidate generation
 
-```text
-.
-├── .github/
-│   └── workflows/
-│       └── scanner.yml      # GitHub Actions Cron Configuration
-├── .last_alert_time         # State file ป้องกันการส่ง Alert ซ้ำ
-├── scanner.py               # Main Analytics Engine
-├── requirements.txt         # Python Dependencies
-└── README.md                # Project Documentation
+The replay engine is the main development/testing tool. It runs in safe mode without AI, Telegram, or live orders.
+
+## Replay
+
+Example:
+
+```powershell
+python replay_test.py
+```
+
+Replay output includes:
+
+- gate diagnostics
+- final candidates
+- score buckets
+- LONG / SHORT performance
+- MFE / MAE
+- trigger analysis
+- TP simulation
+- expiry simulation
+- management simulation
+
+## Current development target
+
+The immediate objective is to make the V2 engine robust on the current **1,000 M5-bar replay window** before expanding validation to 10,000+ bars.
+
+V1 baseline code is intentionally not kept in this repository because it is maintained as a separate project.
