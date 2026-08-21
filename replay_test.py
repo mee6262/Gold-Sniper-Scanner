@@ -1,8 +1,8 @@
 """Historical replay + diagnostics for the MT5-native Gold Sniper engine.
 
 Safe research mode: no AI, Telegram, or orders. Uses only data available at each
-closed M5 timestamp. Reports gate funnel, trigger classes, MFE/MAE, and TP
-sensitivity for final unique candidates.
+closed M5 timestamp. Reports gate funnel, trigger classes, MFE/MAE, TP sensitivity,
+and expiry sensitivity for final unique candidates.
 """
 from __future__ import annotations
 import os
@@ -26,7 +26,7 @@ def _history(manager, tf, count):
     return df.sort_values("Time").reset_index(drop=True)
 
 
-def forward_stats(m5, idx, c, tp_r=None):
+def forward_stats(m5, idx, c, tp_r=None, max_forward_bars=None):
     """Evaluate outcome plus MFE/MAE in R over the forward window.
 
     If tp_r is supplied, simulate a TP at tp_r * initial risk without changing
@@ -43,7 +43,8 @@ def forward_stats(m5, idx, c, tp_r=None):
     else:
         tp = entry - risk * float(tp_r)
 
-    end = min(len(m5), idx + 1 + MAX_FORWARD_BARS)
+    window = MAX_FORWARD_BARS if max_forward_bars is None else int(max_forward_bars)
+    end = min(len(m5), idx + 1 + window)
     max_fav = 0.0
     max_adv = 0.0
     outcome = "EXPIRED"
@@ -102,6 +103,16 @@ def _wr(bucket):
     return tp, sl, len(bucket) - decided, (tp / decided * 100 if decided else 0.0)
 
 
+def _sim_stats(results, tp_r=1.0):
+    tp = results.count("TP")
+    sl = results.count("SL")
+    expired = results.count("EXPIRED")
+    decided = tp + sl
+    wr = tp / decided * 100 if decided else 0.0
+    ev = ((tp * tp_r) - sl) / len(results) if results else 0.0
+    return tp, sl, expired, wr, ev
+
+
 def print_trigger_diagnostics(unique):
     print("\n[REPLAY] ===== TRIGGER ANALYSIS =====")
     classes = sorted({trigger_class(c) for c in unique})
@@ -132,13 +143,18 @@ def print_tp_simulation(m5, unique):
     print("\n[REPLAY] ===== TP SIMULATION =====")
     for tp_r in (1.0, 1.5, 2.0, 2.5, 3.0):
         results = [forward_stats(m5, c["replay_index"], c, tp_r=tp_r)[0] for c in unique]
-        tp = results.count("TP")
-        sl = results.count("SL")
-        expired = results.count("EXPIRED")
-        decided = tp + sl
-        wr = tp / decided * 100 if decided else 0.0
-        expectancy = ((tp * tp_r) - sl) / len(results) if results else 0.0
+        tp, sl, expired, wr, expectancy = _sim_stats(results, tp_r)
         print(f"[REPLAY] TP={tp_r:.1f}R: n={len(results)} TP={tp} SL={sl} EXPIRED={expired} WR={wr:.1f}% approx_EV={expectancy:+.2f}R")
+
+
+def print_expiry_simulation(m5, unique):
+    """Compare expiry windows without changing the candidate or entry logic."""
+    print("\n[REPLAY] ===== EXPIRY SIMULATION =====")
+    for bars in (15, 30, 45, 60):
+        results = [forward_stats(m5, c["replay_index"], c, max_forward_bars=bars)[0] for c in unique]
+        tp, sl, expired, wr, expectancy = _sim_stats(results, 1.0)
+        minutes = bars * 5
+        print(f"[REPLAY] EXPIRY={bars} bars ({minutes}m): n={len(results)} TP={tp} SL={sl} EXPIRED={expired} WR={wr:.1f}% EV@1R={expectancy:+.2f}R")
 
 
 def main():
@@ -217,6 +233,7 @@ def main():
         print_trigger_diagnostics(unique)
         print_mfe_diagnostics(unique)
         print_tp_simulation(m5, unique)
+        print_expiry_simulation(m5, unique)
 
         print("[REPLAY] top setups:")
         for n, c in enumerate(sorted(unique, key=lambda x: x["score"], reverse=True)[:10], 1):
