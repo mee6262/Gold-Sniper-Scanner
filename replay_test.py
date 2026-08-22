@@ -1,8 +1,8 @@
 """Historical replay + diagnostics for the MT5-native Gold Sniper engine.
 
 Safe research mode: no AI, Telegram, or orders. Uses only data available at each
-closed M5 timestamp. Reports gate funnel, trigger classes, MFE/MAE, TP sensitivity,
-expiry sensitivity, and management simulations for final unique candidates.
+closed M5 timestamp. Reports gate funnel, SL geometry policy, trigger classes,
+MFE/MAE, TP sensitivity, expiry sensitivity, and management simulations.
 """
 from __future__ import annotations
 import os
@@ -10,7 +10,7 @@ from datetime import timedelta
 from dotenv import load_dotenv
 import pandas as pd
 from data_manager import MT5DataManager
-from mt5_sniper_engine import build_candidate, diagnose_gates, MIN_SCORE
+from mt5_sniper_engine import build_candidate, diagnose_gates, MIN_SCORE, MIN_SL_DISTANCE, MIN_SL_ATR_MULT, MIN_SL_SPREAD_MULT
 
 load_dotenv()
 BARS = int(os.getenv("REPLAY_BARS", "500"))
@@ -52,6 +52,9 @@ def forward_stats(m5, idx, c, tp_r=None, max_forward_bars=None):
             fav = (entry - lo) / risk; adv = (hi - entry) / risk
             hit_sl, hit_tp = hi >= sl, lo <= tp
         max_fav = max(max_fav, fav); max_adv = max(max_adv, adv)
+        # Conservative intrabar rule: when both SL and TP are touched in the
+        # same M5 candle, assume SL first. Without tick/order data this avoids
+        # granting the replay impossible execution quality.
         if hit_sl and hit_tp:
             outcome, outcome_bars = "SL", j - idx; break
         if hit_sl:
@@ -157,6 +160,7 @@ def main():
     try:
         symbol=manager.client.symbol; m5=_history(manager,"M5",BARS); m15=_history(manager,"M15",max(BARS//3+100,150)); m30=_history(manager,"M30",max(BARS//6+100,120))
         print(f"[REPLAY] symbol={symbol} M5={len(m5)} M15={len(m15)} M30={len(m30)} threshold={MIN_SCORE}")
+        print(f"[REPLAY] SL GUARD: min_distance={MIN_SL_DISTANCE:.3f} ATRx={MIN_SL_ATR_MULT:.2f} spreadx={MIN_SL_SPREAD_MULT:.1f}")
         print("[REPLAY] SAFE MODE: no AI, Telegram, or orders.")
         raw=[]; unique=[]; scanned=0; funnel={"valid":0,"score_pass":0,"location":0,"trigger":0,"final":0}; side_funnel={"LONG":{k:0 for k in funnel},"SHORT":{k:0 for k in funnel}}; last_unique_idx=-10**9
         for i in range(MIN_HISTORY,len(m5)-1):
