@@ -8,15 +8,18 @@ from __future__ import annotations
 import os
 from datetime import timedelta
 from dotenv import load_dotenv
+import numpy as np
 import pandas as pd
+import mt5_sniper_engine as engine
 from data_manager import MT5DataManager
-from mt5_sniper_engine import build_candidate, diagnose_gates, MIN_SCORE, MIN_SL_DISTANCE, MIN_SL_ATR_MULT, MIN_SL_SPREAD_MULT
+from mt5_sniper_engine import build_candidate, diagnose_gates, MIN_SCORE, MIN_SL_DISTANCE, MIN_SL_ATR_MULT, MIN_SL_SPREAD_MULT, PIVOT_LEFT, PIVOT_RIGHT, MIN_STRUCTURE_BARS
 
 load_dotenv()
 BARS = int(os.getenv("REPLAY_BARS", "500"))
 MIN_HISTORY = 40
 MAX_FORWARD_BARS = int(os.getenv("REPLAY_FORWARD_BARS", "60"))
 COOLDOWN_BARS = int(os.getenv("REPLAY_COOLDOWN_BARS", "6"))
+PROGRESS_EVERY = int(os.getenv("REPLAY_PROGRESS_EVERY", "500"))
 
 
 def _history(manager, tf, count):
@@ -24,6 +27,44 @@ def _history(manager, tf, count):
     if df.empty:
         raise RuntimeError(f"No {tf} history returned")
     return df.sort_values("Time").reset_index(drop=True)
+
+
+def _fast_recent_pivots(df):
+    """Replay-only pivot implementation.
+
+    The production engine needs only the latest two confirmed highs/lows for
+    structure and sweep decisions. The old replay implementation recomputed
+    every historical pivot on every M5 bar, turning a 10k replay into an
+    unnecessarily large O(N^2) pandas workload. Scan backwards and stop once
+    two confirmed highs and two confirmed lows are found. This preserves the
+    values used by structure()/sweep() while avoiding look-ahead: a pivot is
+    considered only when its PIVOT_RIGHT confirmation bars are already present.
+    """
+    highs, lows = [], []
+    if df is None or len(df) < MIN_STRUCTURE_BARS:
+        return highs, lows
+    h = np.asarray(df["High"], dtype=float)
+    l = np.asarray(df["Low"], dtype=float)
+    last_confirmed = len(df) - PIVOT_RIGHT - 1
+    for i in range(last_confirmed, PIVOT_LEFT - 1, -1):
+        if len(highs) < 2:
+            hi = h[i]
+            if hi > np.max(h[i-PIVOT_LEFT:i]) and hi > np.max(h[i+1:i+PIVOT_RIGHT+1]):
+                highs.append((i, float(hi)))
+        if len(lows) < 2:
+            lo = l[i]
+            if lo < np.min(l[i-PIVOT_LEFT:i]) and lo < np.min(l[i+1:i+PIVOT_RIGHT+1]):
+                lows.append((i, float(lo)))
+        if len(highs) >= 2 and len(lows) >= 2:
+            break
+    highs.reverse(); lows.reverse()
+    return highs, lows
+
+
+# Monkey-patch only the replay process. Production/live engine behavior is not
+# changed. structure() and sweep() consume only the latest two pivots, so this
+# is equivalent for the current v2 hybrid logic and dramatically faster.
+engine.pivots = _fast_recent_pivots
 
 
 def forward_stats(m5, idx, c, tp_r=None, max_forward_bars=None):
@@ -52,9 +93,6 @@ def forward_stats(m5, idx, c, tp_r=None, max_forward_bars=None):
             fav = (entry - lo) / risk; adv = (hi - entry) / risk
             hit_sl, hit_tp = hi >= sl, lo <= tp
         max_fav = max(max_fav, fav); max_adv = max(max_adv, adv)
-        # Conservative intrabar rule: when both SL and TP are touched in the
-        # same M5 candle, assume SL first. Without tick/order data this avoids
-        # granting the replay impossible execution quality.
         if hit_sl and hit_tp:
             outcome, outcome_bars = "SL", j - idx; break
         if hit_sl:
@@ -161,9 +199,11 @@ def main():
         symbol=manager.client.symbol; m5=_history(manager,"M5",BARS); m15=_history(manager,"M15",max(BARS//3+100,150)); m30=_history(manager,"M30",max(BARS//6+100,120))
         print(f"[REPLAY] symbol={symbol} M5={len(m5)} M15={len(m15)} M30={len(m30)} threshold={MIN_SCORE}")
         print(f"[REPLAY] SL GUARD: min_distance={MIN_SL_DISTANCE:.3f} ATRx={MIN_SL_ATR_MULT:.2f} spreadx={MIN_SL_SPREAD_MULT:.1f}")
+        print(f"[REPLAY] PERFORMANCE: recent-pivot cache active; progress every {PROGRESS_EVERY} bars")
         print("[REPLAY] SAFE MODE: no AI, Telegram, or orders.")
-        raw=[]; unique=[]; scanned=0; funnel={"valid":0,"score_pass":0,"location":0,"trigger":0,"final":0}; side_funnel={"LONG":{k:0 for k in funnel},"SHORT":{k:0 for k in funnel}}; last_unique_idx=-10**9
-        for i in range(MIN_HISTORY,len(m5)-1):
+        unique=[]; scanned=0; funnel={"valid":0,"score_pass":0,"location":0,"trigger":0,"final":0}; side_funnel={"LONG":{k:0 for k in funnel},"SHORT":{k:0 for k in funnel}}; last_unique_idx=-10**9
+        total=len(m5)-1
+        for i in range(MIN_HISTORY,total):
             candle_time=pd.Timestamp(m5.iloc[i]["Time"]); scan_time=candle_time+timedelta(minutes=5); m15_hist=m15[m15["Time"]+timedelta(minutes=15)<=scan_time]; m30_hist=m30[m30["Time"]+timedelta(minutes=30)<=scan_time]
             if len(m15_hist)<MIN_HISTORY or len(m30_hist)<MIN_HISTORY: continue
             data={"M5":m5.iloc[:i+1],"M15":m15_hist.reset_index(drop=True),"M30":m30_hist.reset_index(drop=True)}; d=diagnose_gates(data)
@@ -174,10 +214,12 @@ def main():
                 if gate_value: funnel[key]+=1; sf[key]+=1
             c=build_candidate(data,tick=None)
             if not c: continue
-            c["replay_index"]=i; c["replay_scan_time"]=scan_time.isoformat(); raw.append(c)
+            c["replay_index"]=i; c["replay_scan_time"]=scan_time.isoformat()
             if i-last_unique_idx<COOLDOWN_BARS: continue
             c["outcome"],c["outcome_bars"],c["mfe_r"],c["mae_r"]=forward_stats(m5,i,c); unique.append(c); last_unique_idx=i
             print(f"[REPLAY] UNIQUE #{len(unique)} {c['direction']} score={c['score']:.0f} RR={c['rr']:.2f} entry={c['entry']:.3f} sl={c['sl']:.3f} tp={c['tp']:.3f} outcome={c['outcome']} bars={c['outcome_bars']} MFE={c['mfe_r']:.2f}R MAE={c['mae_r']:.2f}R candle={c['candle_time']}")
+            if PROGRESS_EVERY > 0 and (i-MIN_HISTORY+1) % PROGRESS_EVERY == 0:
+                print(f"[REPLAY] progress={i-MIN_HISTORY+1}/{total-MIN_HISTORY} ({(i-MIN_HISTORY+1)/(total-MIN_HISTORY)*100:.1f}%) unique={len(unique)}")
         print("\n[REPLAY] ===== GATE DIAGNOSTICS =====")
         print(f"[REPLAY] valid={funnel['valid']} score_pass={funnel['score_pass']} location={funnel['location']} trigger={funnel['trigger']} final={funnel['final']}")
         for direction in ("LONG","SHORT"):
